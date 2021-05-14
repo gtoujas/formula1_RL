@@ -7,6 +7,7 @@ pd.set_option('display.max_columns', None)
 
 class FormulaOne(gym.Env):
   metadata = {'render.modes': ['human']}
+
   def __init__(self):
       #define number of racers
       self.racers = 2
@@ -18,14 +19,13 @@ class FormulaOne(gym.Env):
       self.medium_life = 20
       self.hard_life = 40
 
-
-      #action space defined as follows
-      # action 0 = do nothing
-      # action 1 = attempt overtake (currently an allowable action even if overtake isn't possible)
-      # action 2 = pit for soft tires (fastest tire, deteriorates quicker)
-      # action 3 = pit for medium tire (middle between soft and hard)
-      # action 4 = pit for hard tire (slowest tire, lasts the longest)
-
+      '''
+      action space defined as follows
+      action 0 = do nothing
+      action 1 = pit for soft tires (fastest tire, deteriorates quicker)
+      action 2 = pit for medium tire (middle between soft and hard)
+      action 3 = pit for hard tire (slowest tire, lasts the longest)
+      '''
       self.action_space = spaces.Discrete(4)
       self.racer_obs_keys = ['position','driver','laps_remaining','pace','interval','tire', 'tire_laps','elapsed_race_time','pitstops','tire_compound_flag','pace_difference','old_tire_flag']
 
@@ -46,18 +46,10 @@ class FormulaOne(gym.Env):
       self.observation_space = spaces.Tuple((spaces.Discrete(self.racers), racer_space))
       self.state = None
 
-  def switch_racers(self,passing_racer):
-      index = int(passing_racer)
-      state = self.state
-      passing_racer_row = np.array(state[index,:])
-      passed_racer_row = np.array(state[(index-1),:])
-      state[passing_racer-1,1:] = passing_racer_row[1:]
-      state[passing_racer,1:] = passed_racer_row[1:]
-      return state
 
 
-  def update_intervals2(self):
-      #all based on pace difference - cars overtake as we wish - no overtake action for now
+  def update_intervals(self):
+      #all based on pace difference
       prev_interval = self.state[1][4] - self.state[0][4]
       pace_diff = self.state[0][3] - self.state[1][3]
       #if second car is faster than the gap, it goes ahead
@@ -76,27 +68,9 @@ class FormulaOne(gym.Env):
 
       return
 
-  def update_intervals(self,state):
-      #this is called always at the end of a step?
-
-      #all based on pace difference
-      #for now can do all based on two drivers if easier
-
-      #calculate previous interval between two cars
-      prev_interval = state[1][4] - state[0][4]
-      pace_diff = state[1][3] - state[0][3]
-
-      #add pace_diff to previous interval
-      state[1][4] = pace_diff + prev_interval
-      #make lead car interval 0
-      state[0][4] = 0
-
-      self.state = state
-
-      return self.state
 
   def pace_calculation(self,driver_state):
-
+      # this method determines the pace of the car for the upcoming lap
       current_tire = driver_state[5]
       tire_age = driver_state[6]
       race_laps = driver_state[2]
@@ -116,7 +90,7 @@ class FormulaOne(gym.Env):
       '''
       key assumptions for pace: 
        - fuel makes a difference of about 5 seconds total, goes down linearly throughout the race
-       - you lose 0.05 second per lap of tire age if age is less than life, otherwise lose summing seconds per lap
+       - you lose 0.05 second per lap of tire age if age is less than life, otherwise you lose time exponentially on "old" tires
        - random variance of 0.05 seconds added
       '''
       fuel_diff = 5 * lap_percentage_remaining
@@ -130,9 +104,7 @@ class FormulaOne(gym.Env):
 
   def update_pace(self):
       #see pace_calculation for details
-
       for row in self.state:
-
           row[3] = self.pace_calculation(driver_state = row)
 
 
@@ -151,12 +123,10 @@ class FormulaOne(gym.Env):
       # reset tire laps to 0
       self.state[racer][6] = 0
 
-
       return
 
   def get_rewards(self):
-      #make sure rewards are ordered correctly
-
+      #returns rewards of racers in correct order
       rewards = [0,0]
       racer_1_pos = int(np.where(self.state[:, 1] == 1)[0][0])
       rewards[0] = -self.state[racer_1_pos][3]
@@ -175,6 +145,7 @@ class FormulaOne(gym.Env):
       return
 
   def check_tire_age_flag(self):
+      #depending tire compound and laps on current tire, determine if the tire has been on for longer than it's "life"
       for row in self.state:
           #do for each tire compound
           if row[5] == 0:
@@ -205,10 +176,11 @@ class FormulaOne(gym.Env):
 
 
   def multi_step(self,actions):
+      #environment step function that takes actions of all drivers as argument
+
       #last pace and next pace done in this loop
       old_pace_1 = self.get_pace(1)
       old_pace_2 = self.get_pace(2)
-
 
       # update pace for upcoming lap
       self.update_pace()
@@ -222,12 +194,7 @@ class FormulaOne(gym.Env):
       #test to see if trailing racer can pass leading racer
       interval = self.state[1][4]
       pace_diff = self.state[0][3] - self.state[1][3]
-      if pace_diff > interval:
-          pass_flag = True
-      else:
-          pass_flag = False
 
-      #do other actions first, leave passing for last if no actions have been taken
       if leading_racer_action > 0:
           self.pitstop(racer = 0,action = leading_racer_action)
 
@@ -235,8 +202,8 @@ class FormulaOne(gym.Env):
           self.pitstop(racer = 1, action = trailing_racer_action)
 
       #move cars based on pace
-      self.update_intervals2()
-      # take away total laps to all cars
+      self.update_intervals()
+      # take away laps remaining from all cars
       self.state[:, 2] -= 1
       # add tire laps to all cars
       self.state[:, 6] += 1
@@ -267,64 +234,8 @@ class FormulaOne(gym.Env):
       return state, rewards, done, info
 
 
-  def step(self, action):
-
-      #this finds racer who started in last position - our racer bring trained
-      racer_index =  np.where(self.state[:, 1] == self.racers)[0][0]
-
-
-      #this determines how much faster our racer is than the car ahead
-      if racer_index == 0:
-          pace_gap = 0
-      else:
-          pace_gap = self.state[racer_index-1,3] - self.state[racer_index,3]
-
-      #defining probability of passing the car ahead to be 50%
-      #consider making this something like 1 - (interval / pace_gap)???
-      pass_prob = .9
-      random_draw = np.random.rand()
-
-      if action == 1:
-          if (pace_gap > self.state[racer_index,4]):
-              #attempting a pass
-
-            if(pass_prob>random_draw):
-                #pass successful
-
-                print("Successful pass")
-                self.state = self.switch_racers(racer_index)
-            else:
-                print("Unsuccessful pass")
-                #loses 0.3 of a second to the car ahead on unsuccessful pass
-                self.state[racer_index,3] = self.state[racer_index-1,3] + 0.3
-      elif action == 0:
-          #if faster than car ahead, trail it by 0.1 second
-          if (pace_gap > self.state[racer_index, 4]):
-              self.state[racer_index, 3] = self.state[racer_index - 1, 3] - self.state[racer_index,4] + 0.1
-
-
-
-      #update intervals
-      self.update_intervals(state=self.state)
-      #add total laps to all cars
-      self.state[:,2]+=1
-      #add tire laps to all cars
-      self.state[:,6]+=1
-      #add lap time to elapsed race time
-      self.state[:,7]+=self.state[:,3]
-      #update pace for next lap
-      self.update_pace()
-      state = self.state
-
-      reward=0
-      done = False
-      if self.state[0][2]==self.total_laps:
-          done = True
-      info = {}
-      return state, reward, done, info
-
   def reset(self,start_laps = 30):
-    #resets to beginning of the race
+    #resets to beginning of the race with laps as an argument
     self.total_laps = start_laps
     state_array = np.zeros(shape=(self.racers,len(self.racer_obs_keys)))
 
@@ -362,8 +273,6 @@ class FormulaOne(gym.Env):
         row[10] = 0
         # false old tire flag
         row[11] = 0
-
-
         i += 1
 
     self.state = state_array
@@ -387,12 +296,8 @@ class FormulaOne(gym.Env):
       return racer_2_obs
 
   def render(self, mode='human'):
-    #to do later for rendering
+    #prints and returns dataframe that summarizes the current state in the race
     render_df = pd.DataFrame(self.state,columns = self.racer_obs_keys)
     print(render_df)
-    return
+    return render_df
 
-  def close(self):
-      #to investigate whether or not we really need this
-
-    ...
